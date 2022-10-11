@@ -2,8 +2,10 @@ use std::ops::Deref;
 
 use crate::result::Result;
 use clap::Parser;
-use git2::{Commit, FetchOptions, Oid, PushOptions, Reference, Repository, Submodule};
 use git2::build::RepoBuilder;
+use git2::{
+    Commit, FetchOptions, Oid, PushOptions, Reference, Repository, Submodule,
+};
 use log::{debug, info, trace};
 use tempfile::{tempdir, TempDir};
 
@@ -34,7 +36,9 @@ impl TempRepository {
     pub fn clone_recurse(url: &str, options: FetchOptions<'_>) -> Result<Self> {
         let tempdir = tempdir()?;
         trace!("Cloning {} into {}", url, tempdir.path().display());
-        let repository = RepoBuilder::new().fetch_options(options).clone(url, tempdir.path())?;
+        let repository = RepoBuilder::new()
+            .fetch_options(options)
+            .clone(url, tempdir.path())?;
 
         Ok(Self {
             repository,
@@ -50,7 +54,11 @@ impl Deref for TempRepository {
     }
 }
 
-fn clone_composite(url: &str, branch: &Reference, options: FetchOptions<'_>) -> Result<TempRepository> {
+fn clone_composite(
+    url: &str,
+    branch: &Reference,
+    options: FetchOptions<'_>,
+) -> Result<TempRepository> {
     let repo = TempRepository::clone_recurse(url, options).unwrap();
 
     let shorthand = branch.shorthand().unwrap();
@@ -108,8 +116,10 @@ fn update_submodule(submodule: &mut Submodule, id: Oid) -> Result<()> {
     Ok(())
 }
 
-
-fn push_composite(composite_repo: &TempRepository, mut options: PushOptions) -> Result<()> {
+fn push_composite(
+    composite_repo: &TempRepository,
+    mut options: PushOptions,
+) -> Result<()> {
     let mut remote = composite_repo.find_remote("origin")?;
     let callbacks = git2::RemoteCallbacks::new();
     // TODO: Add authentication and error reporting
@@ -167,7 +177,10 @@ fn resolve_git_push<'a>(args: &Args) -> Result<git2::PushOptions<'a>> {
 }
 
 fn to_collect(args: &Args) -> Vec<&str> {
-    args.custom_headers.iter().map(|x| x.as_str()).collect::<Vec<&str>>()
+    args.custom_headers
+        .iter()
+        .map(|x| x.as_str())
+        .collect::<Vec<&str>>()
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -181,7 +194,8 @@ pub fn run(args: Args) -> Result<()> {
     let push_options = resolve_git_push(&args)?;
     let fetch_options = resolve_git_fetch(&args)?;
 
-    let composite_repo = clone_composite(&args.composite_repository, &head, fetch_options)?;
+    let composite_repo =
+        clone_composite(&args.composite_repository, &head, fetch_options)?;
 
     let mut submodule = find_submodule(&composite_repo, &head)?;
 
