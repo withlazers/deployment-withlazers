@@ -30,10 +30,10 @@ jobs:
     strategy:
       matrix:
         target:
-        #- aarch64-unknown-linux-musl
-        #- i686-unknown-linux-musl
+        - aarch64-unknown-linux-musl
+        - i686-unknown-linux-musl
         - x86_64-unknown-linux-musl
-        #- armv7-unknown-linux-musleabihf
+        - armv7-unknown-linux-musleabihf
         #- i686-pc-windows-gnu
         #- x86_64-pc-windows-gnu
     steps:
@@ -44,26 +44,26 @@ jobs:
         target: ${{ matrix.target }}
         use-cross: true
 
-  #build-apple:
-  #  needs: prepare
-  #  runs-on: 'macos-latest'
-  #  strategy:
-  #    matrix:
-  #      target:
-  #      - x86_64-apple-darwin
-  #      - aarch64-apple-darwin
-  #  steps:
-  #  - uses: actions/checkout@v3
-  #  - uses: ./.github/actions/rust-build
-  #    name: Build
-  #    with:
-  #      target: ${{ matrix.target }}
-  #      use-cross: false
+  build-apple:
+    needs: prepare
+    runs-on: 'macos-latest'
+    strategy:
+      matrix:
+        target:
+        - x86_64-apple-darwin
+        - aarch64-apple-darwin
+    steps:
+    - uses: actions/checkout@v3
+    - uses: ./.github/actions/rust-build
+      name: Build
+      with:
+        target: ${{ matrix.target }}
+        use-cross: false
 
   release:
     needs:
     - build
-    #- build-apple
+    - build-apple
     runs-on: 'ubuntu-latest'
 
     steps:
