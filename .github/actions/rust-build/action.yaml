@@ -15,6 +15,8 @@ runs:
     with:
       target: ${{ inputs.target }}
       use-cross: ${{ inputs.use-cross }}
-      binaries: nk
+      binaries: deploy
       archive-prefix: deployment-withlazers-${{ github.ref_name }}
-      extra-files: README.md
+      extra-files: >
+        README.md
+        LICENSE
