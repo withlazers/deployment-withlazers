@@ -44,26 +44,26 @@ jobs:
         target: ${{ matrix.target }}
         use-cross: true
 
-  build-apple:
-    needs: prepare
-    runs-on: 'macos-latest'
-    strategy:
-      matrix:
-        target:
-        - x86_64-apple-darwin
-        - aarch64-apple-darwin
-    steps:
-    - uses: actions/checkout@v3
-    - uses: ./.github/actions/rust-build
-      name: Build
-      with:
-        target: ${{ matrix.target }}
-        use-cross: false
+  #build-apple:
+  #  needs: prepare
+  #  runs-on: 'macos-latest'
+  #  strategy:
+  #    matrix:
+  #      target:
+  #      - x86_64-apple-darwin
+  #      - aarch64-apple-darwin
+  #  steps:
+  #  - uses: actions/checkout@v3
+  #  - uses: ./.github/actions/rust-build
+  #    name: Build
+  #    with:
+  #      target: ${{ matrix.target }}
+  #      use-cross: false
 
   release:
     needs:
     - build
-    - build-apple
+    #- build-apple
     runs-on: 'ubuntu-latest'
 
     steps:
