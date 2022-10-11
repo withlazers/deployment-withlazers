@@ -19,4 +19,3 @@ runs:
       archive-prefix: deployment-withlazers-${{ github.ref_name }}
       extra-files: >
         README.md
-        LICENSE
