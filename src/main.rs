@@ -19,6 +19,7 @@ enum Action {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    pretty_env_logger::init();
 
     match args.subcommand {
         Action::Pipeline(pipeline) => subcommands::pipeline::run(pipeline),
