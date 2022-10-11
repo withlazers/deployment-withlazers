@@ -2,33 +2,43 @@ use std::ops::Deref;
 
 use crate::result::Result;
 use clap::Parser;
-use git2::{BranchType, Commit, Oid, Reference, Repository, Submodule};
+use git2::{Commit, FetchOptions, Oid, PushOptions, Reference, Repository, Submodule};
+use git2::build::RepoBuilder;
 use log::{debug, info, trace};
 use tempfile::{tempdir, TempDir};
 
 #[derive(Parser, Debug, Clone)]
 pub struct Args {
+    /// Repository that is updated
     #[arg(short, long, default_value = ".")]
     repository: String,
+
+    /// The composite repository
     #[arg(short, long)]
     composite_repository: String,
+
+    /// Set custom headers for pulling and pushing
+    #[arg(short, long)]
+    custom_headers: Vec<String>,
 }
 
 pub struct TempRepository {
     repository: Repository,
-    // tempdir is never read, but must be kept as long as the Repository
+    // temp_dir is never read, but must be kept as long as the Repository
     // is accessed.
     #[allow(dead_code)]
-    tempdir: TempDir,
+    temp_dir: TempDir,
 }
+
 impl TempRepository {
-    pub fn clone_recurse(url: &str) -> Result<Self> {
+    pub fn clone_recurse(url: &str, options: FetchOptions<'_>) -> Result<Self> {
         let tempdir = tempdir()?;
         trace!("Cloning {} into {}", url, tempdir.path().display());
-        let repository = Repository::clone_recurse(url, tempdir.path())?;
+        let repository = RepoBuilder::new().fetch_options(options).clone(url, tempdir.path())?;
+
         Ok(Self {
             repository,
-            tempdir,
+            temp_dir: tempdir,
         })
     }
 }
@@ -40,8 +50,8 @@ impl Deref for TempRepository {
     }
 }
 
-fn checkout_composite(url: &str, branch: &Reference) -> Result<TempRepository> {
-    let repo = TempRepository::clone_recurse(url).unwrap();
+fn clone_composite(url: &str, branch: &Reference, options: FetchOptions<'_>) -> Result<TempRepository> {
+    let repo = TempRepository::clone_recurse(url, options).unwrap();
 
     let shorthand = branch.shorthand().unwrap();
     {
@@ -55,8 +65,11 @@ fn checkout_composite(url: &str, branch: &Reference) -> Result<TempRepository> {
         };
 
         debug!("Creating branch {:?} in {:?}", shorthand, repo.path());
-        let new_branch = repo.branch(shorthand, &branch_commit, false)?;
-        debug!("Created branch {:?}", new_branch.name());
+        if let Ok(new_branch) = repo.branch(shorthand, &branch_commit, false) {
+            debug!("Created branch {:?}", new_branch.name());
+        } else {
+            debug!("Reusing branch {:?}", shorthand);
+        }
     }
 
     repo.set_head(&format!("refs/heads/{}", shorthand))?;
@@ -73,7 +86,12 @@ fn find_submodule<'a>(
     let submodules = composite_repo.submodules()?;
     let (_, submodule) = submodules
         .into_iter()
-        .map(|x| (x.open().unwrap(), x))
+        .map(|mut x| {
+            x.update(true, None).unwrap();
+            (x.open().unwrap(), x)
+
+            // run --package deployment-withlazers --bin deploy -- pipeline --composite-repository=/tmp/test-repos/composite-bare --repository=/tmp/test-repos/composite/micro-service-gary
+        })
         .find(|(repository, _)| repository.find_commit(commit.id()).is_ok())
         .ok_or("No submodule found")?;
     info!("Found submodule: {:?}", submodule.path());
@@ -90,12 +108,12 @@ fn update_submodule(submodule: &mut Submodule, id: Oid) -> Result<()> {
     Ok(())
 }
 
-fn push_composite(composite_repo: &TempRepository) -> Result<()> {
+
+fn push_composite(composite_repo: &TempRepository, mut options: PushOptions) -> Result<()> {
     let mut remote = composite_repo.find_remote("origin")?;
-    let mut push_options = git2::PushOptions::new();
     let callbacks = git2::RemoteCallbacks::new();
     // TODO: Add authentication and error reporting
-    push_options.remote_callbacks(callbacks);
+    options.remote_callbacks(callbacks);
 
     // https://docs.rs/git2/latest/git2/struct.RemoteCallbacks.html
     // git -c http.https://<url of submodule repository>.extraheader="AUTHORIZATION: basic <BASE64_ENCODED_TOKEN_DESCRIBED_ABOVE>" submodule update --init --recursive
@@ -105,7 +123,7 @@ fn push_composite(composite_repo: &TempRepository) -> Result<()> {
         return Err("Composite repository is not on a branch".into());
     }
 
-    remote.push(&[head.name().unwrap()], Some(&mut push_options))?;
+    remote.push(&[head.name().unwrap()], Some(&mut options))?;
     Ok(())
 }
 
@@ -136,15 +154,34 @@ fn commit_composite(
     Ok(())
 }
 
+fn resolve_git_fetch<'a>(args: &Args) -> Result<git2::FetchOptions<'a>> {
+    let mut options = git2::FetchOptions::new();
+    options.custom_headers(&to_collect(args));
+    Ok(options)
+}
+
+fn resolve_git_push<'a>(args: &Args) -> Result<git2::PushOptions<'a>> {
+    let mut options = git2::PushOptions::new();
+    options.custom_headers(&to_collect(&args));
+    Ok(options)
+}
+
+fn to_collect(args: &Args) -> Vec<&str> {
+    args.custom_headers.iter().map(|x| x.as_str()).collect::<Vec<&str>>()
+}
+
 pub fn run(args: Args) -> Result<()> {
-    let repo = Repository::open(args.repository)?;
+    let repo = Repository::open(args.repository.clone())?;
 
     let head = repo.head()?;
     if !head.is_branch() {
         return Err("HEAD is not a branch".into());
     }
 
-    let composite_repo = checkout_composite(&args.composite_repository, &head)?;
+    let push_options = resolve_git_push(&args)?;
+    let fetch_options = resolve_git_fetch(&args)?;
+
+    let composite_repo = clone_composite(&args.composite_repository, &head, fetch_options)?;
 
     let mut submodule = find_submodule(&composite_repo, &head)?;
 
@@ -154,7 +191,8 @@ pub fn run(args: Args) -> Result<()> {
 
     commit_composite(&composite_repo, &submodule, &commit)?;
 
-    push_composite(&composite_repo)?;
+    // push_composite(&composite_repo, resolve_git_auth(args))?;
+    push_composite(&composite_repo, push_options)?;
 
     Ok(())
 }
