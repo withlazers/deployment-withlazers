@@ -1,12 +1,8 @@
-use std::ops::Deref;
-
 use crate::result::Result;
 use clap::Parser;
 use git2::build::RepoBuilder;
-use git2::{
-    Commit, FetchOptions, Oid, PushOptions, Reference, Repository, Submodule,
-};
-use log::{debug, info, trace};
+use git2::{BranchType, FetchOptions, Oid, Repository, Submodule};
+use log::{info, trace};
 use tempfile::{tempdir, TempDir};
 
 #[derive(Parser, Debug, Clone)]
@@ -15,198 +11,223 @@ pub struct Args {
     #[arg(short, long, default_value = ".")]
     repository: String,
 
+    /// Branch to updated
+    #[arg(short, long)]
+    git_ref: Option<String>,
+
     /// The composite repository
     #[arg(short, long)]
     composite_repository: String,
 
     /// Set custom headers for pulling and pushing
-    #[arg(short, long)]
+    #[arg(short = 'C', long)]
     custom_headers: Vec<String>,
 }
 
-pub struct TempRepository {
-    repository: Repository,
-    // temp_dir is never read, but must be kept as long as the Repository
-    // is accessed.
-    #[allow(dead_code)]
-    temp_dir: TempDir,
+impl Args {
+    fn custom_headers_ref(&self) -> Vec<&str> {
+        self.custom_headers
+            .iter()
+            .map(|x| x.as_str())
+            .collect::<Vec<&str>>()
+    }
 }
 
-impl TempRepository {
-    pub fn clone_recurse(url: &str, options: FetchOptions<'_>) -> Result<Self> {
+struct RepositoryWrapper<'a> {
+    repository: Repository,
+    args: &'a Args,
+    #[allow(dead_code)]
+    tempdir: Option<TempDir>,
+}
+
+impl<'a> RepositoryWrapper<'a> {
+    pub fn clone(url: &str, args: &'a Args) -> Result<Self> {
+        let mut fetch_options = FetchOptions::new();
+        fetch_options.custom_headers(&args.custom_headers_ref());
+
         let tempdir = tempdir()?;
         trace!("Cloning {} into {}", url, tempdir.path().display());
         let repository = RepoBuilder::new()
-            .fetch_options(options)
+            .fetch_options(fetch_options)
             .clone(url, tempdir.path())?;
 
         Ok(Self {
             repository,
-            temp_dir: tempdir,
+            args,
+            tempdir: Some(tempdir),
         })
     }
-}
 
-impl Deref for TempRepository {
-    type Target = Repository;
-    fn deref(&self) -> &Self::Target {
-        &self.repository
-    }
-}
-
-fn clone_composite(
-    url: &str,
-    branch: &Reference,
-    options: FetchOptions<'_>,
-) -> Result<TempRepository> {
-    let repo = TempRepository::clone_recurse(url, options).unwrap();
-
-    let shorthand = branch.shorthand().unwrap();
-    {
-        let branch_commit = if let Ok(branch) = repo.find_branch(
-            &format!("origin/{}", shorthand),
-            git2::BranchType::Remote,
-        ) {
-            branch.get().peel_to_commit()?
+    fn git_ref(&self) -> Result<String> {
+        let head = self.repository.head()?;
+        if let Some(git_ref) = &self.args.git_ref {
+            Ok(git_ref.to_string())
+        } else if head.is_branch() {
+            Ok(self.repository.head()?.name().unwrap().to_string())
         } else {
-            repo.head()?.peel_to_commit()?
-        };
-
-        debug!("Creating branch {:?} in {:?}", shorthand, repo.path());
-        if let Ok(new_branch) = repo.branch(shorthand, &branch_commit, false) {
-            debug!("Created branch {:?}", new_branch.name());
-        } else {
-            debug!("Reusing branch {:?}", shorthand);
+            Err("No branch name given and HEAD is not a branch".into())
         }
     }
 
-    repo.set_head(&format!("refs/heads/{}", shorthand))?;
-    repo.checkout_head(None)?;
-
-    Ok(repo)
-}
-
-fn find_submodule<'a>(
-    composite_repo: &'a Repository,
-    head: &Reference,
-) -> Result<Submodule<'a>> {
-    let commit = head.peel_to_commit()?;
-    let submodules = composite_repo.submodules()?;
-    let (_, submodule) = submodules
-        .into_iter()
-        .map(|mut x| {
-            x.update(true, None).unwrap();
-            (x.open().unwrap(), x)
-
-            // run --package deployment-withlazers --bin deploy -- pipeline --composite-repository=/tmp/test-repos/composite-bare --repository=/tmp/test-repos/composite/micro-service-gary
-        })
-        .find(|(repository, _)| repository.find_commit(commit.id()).is_ok())
-        .ok_or("No submodule found")?;
-    info!("Found submodule: {:?}", submodule.path());
-    Ok(submodule)
-}
-
-fn update_submodule(submodule: &mut Submodule, id: Oid) -> Result<()> {
-    let sub_repository = submodule.open()?;
-    let commit = sub_repository.find_commit(id)?;
-    info!("Found commit: {:?}", commit);
-    sub_repository.set_head_detached(commit.id())?;
-    submodule.add_to_index(true)?;
-    info!("Updated {:?}", sub_repository.path());
-    Ok(())
-}
-
-fn push_composite(
-    composite_repo: &TempRepository,
-    mut options: PushOptions,
-) -> Result<()> {
-    let mut remote = composite_repo.find_remote("origin")?;
-    let callbacks = git2::RemoteCallbacks::new();
-    // TODO: Add authentication and error reporting
-    options.remote_callbacks(callbacks);
-
-    // https://docs.rs/git2/latest/git2/struct.RemoteCallbacks.html
-    // git -c http.https://<url of submodule repository>.extraheader="AUTHORIZATION: basic <BASE64_ENCODED_TOKEN_DESCRIBED_ABOVE>" submodule update --init --recursive
-    // https://learn.microsoft.com/en-us/azure/devops/pipelines/repos/pipeline-options-for-git?view=azure-devops&tabs=yaml#alternative-to-using-the-checkout-submodules-option
-    let head = composite_repo.head()?;
-    if !head.is_branch() {
-        return Err("Composite repository is not on a branch".into());
+    fn head_id(&self) -> Result<Oid> {
+        let git_ref = self.git_ref()?;
+        let reference = self.repository.find_reference(&git_ref)?;
+        let commit = reference.peel_to_commit()?;
+        if self.repository.head()?.peel_to_commit()?.id() == commit.id() {
+            Ok(commit.id())
+        } else {
+            Err("HEAD is not on the given branch".into())
+        }
     }
 
-    remote.push(&[head.name().unwrap()], Some(&mut options))?;
-    Ok(())
-}
+    pub fn open(path: &str, args: &'a Args) -> Result<Self> {
+        let repository = Repository::open(path)?;
+        Ok(Self {
+            repository,
+            args,
+            tempdir: None,
+        })
+    }
 
-fn commit_composite(
-    composite_repo: &TempRepository,
-    submodule: &Submodule,
-    original_commit: &Commit,
-) -> Result<()> {
-    let mut index = composite_repo.index()?;
-    let tree_id = index.write_tree()?;
-    let tree = composite_repo.find_tree(tree_id)?;
-    let head = composite_repo.head()?.peel_to_commit()?;
-    let commit = composite_repo.find_commit(head.id())?;
-    let message = format!(
-        "Update submodule {} to {}\n---\n{}",
-        submodule.path().display(),
-        commit.id(),
-        original_commit.message().unwrap()
-    );
-    composite_repo.commit(
-        Some("HEAD"),
-        &original_commit.author(),
-        &original_commit.committer(),
-        &message,
-        &tree,
-        &[&commit],
-    )?;
-    Ok(())
-}
+    /// branch_name is the full branch name containing the remote name (i.e. `refs/heads/main`)
+    pub fn checkout_temp_branch(&self, git_ref: &str) -> Result<()> {
+        trace!(
+            "Checking out {} in {}",
+            git_ref,
+            self.repository.path().display()
+        );
+        let branch_name = Self::get_branch_name_from_ref(git_ref)?;
+        let branch = self.repository.find_branch(
+            &format!("origin/{}", branch_name),
+            BranchType::Remote,
+        );
+        let commit = match branch {
+            Ok(branch) => {
+                trace!("Found reference {}.", git_ref);
+                branch.get().peel_to_commit()?
+            }
+            Err(e) => {
+                trace!("Did not find reference {}, using head: {}", git_ref, e);
+                self.repository.head()?.peel_to_commit()?
+            }
+        };
 
-fn resolve_git_fetch<'a>(args: &Args) -> Result<git2::FetchOptions<'a>> {
-    let mut options = git2::FetchOptions::new();
-    options.custom_headers(&to_collect(args));
-    Ok(options)
-}
+        trace!(
+            "Creating __temporary__ branch in {:?}",
+            self.repository.path()
+        );
+        self.repository.branch("__temporary__", &commit, true)?;
+        self.repository.set_head("refs/heads/__temporary__")?;
+        self.repository.checkout_head(None)?;
+        Ok(())
+    }
 
-fn resolve_git_push<'a>(args: &Args) -> Result<git2::PushOptions<'a>> {
-    let mut options = git2::PushOptions::new();
-    options.custom_headers(&to_collect(&args));
-    Ok(options)
-}
+    fn find_submodule_by_id(&self, id: Oid) -> Result<Submodule<'_>> {
+        let submodules = self.repository.submodules()?;
+        let (_repository, submodule) = submodules
+            .into_iter()
+            .map(|mut x| {
+                x.update(true, None).unwrap();
+                (x.open().unwrap(), x)
+            })
+            .inspect(|(_, x)| trace!("Found submodule {}", x.name().unwrap(),))
+            .find(|(repository, _)| repository.find_commit(id).is_ok())
+            .ok_or("No submodule found")?;
+        info!("Found submodule: {:?}", submodule.path());
+        Ok(submodule)
+    }
 
-fn to_collect(args: &Args) -> Vec<&str> {
-    args.custom_headers
-        .iter()
-        .map(|x| x.as_str())
-        .collect::<Vec<&str>>()
+    fn update_submodule_to_id(
+        &self,
+        submodule: &mut Submodule,
+        id: Oid,
+    ) -> Result<()> {
+        let sub_repository = submodule.open()?;
+        let commit = sub_repository.find_commit(id)?;
+        info!("Found commit: {:?}", commit);
+        sub_repository.set_head_detached(commit.id())?;
+        submodule.add_to_index(true)?;
+        info!("Updated {:?}", sub_repository.path());
+        self.commit(submodule)?;
+        Ok(())
+    }
+
+    fn commit(&self, submodule: &Submodule) -> Result<()> {
+        let mut index = self.repository.index()?;
+        let tree_id = index.write_tree()?;
+        let tree = self.repository.find_tree(tree_id)?;
+        let head = self.repository.head()?.peel_to_commit()?;
+        let commit = self.repository.find_commit(head.id())?;
+        let submodule_repo = submodule.open()?;
+        let submodule_commit = submodule_repo.head()?.peel_to_commit()?;
+        let message = format!(
+            "Update submodule {} to {}\n---\n{}",
+            submodule.path().display(),
+            submodule_commit.id(),
+            submodule_commit.message().unwrap()
+        );
+        self.repository.commit(
+            Some("HEAD"),
+            &submodule_commit.author(),
+            &submodule_commit.committer(),
+            &message,
+            &tree,
+            &[&commit],
+        )?;
+        Ok(())
+    }
+
+    fn get_branch_name_from_ref(git_ref: &str) -> Result<&str> {
+        let prefix = "refs/heads/";
+        if let Some(branch_name) = git_ref.strip_prefix(prefix) {
+            Ok(branch_name)
+        } else {
+            Err("Invalid git ref".into())
+        }
+    }
+
+    fn push(&self, git_ref_target: &str) -> Result<()> {
+        let branch_name = Self::get_branch_name_from_ref(git_ref_target)?;
+        let mut remote = self.repository.find_remote("origin")?;
+        let mut options = git2::PushOptions::new();
+        options.custom_headers(&self.args.custom_headers_ref());
+
+        // https://docs.rs/git2/latest/git2/struct.RemoteCallbacks.html
+        // git -c http.https://<url of submodule repository>.extraheader="AUTHORIZATION: basic <BASE64_ENCODED_TOKEN_DESCRIBED_ABOVE>" submodule update --init --recursive
+        // https://learn.microsoft.com/en-us/azure/devops/pipelines/repos/pipeline-options-for-git?view=azure-devops&tabs=yaml#alternative-to-using-the-checkout-submodules-option
+        let head = self.repository.head()?;
+        if !head.is_branch() {
+            return Err("Composite repository is not on a branch".into());
+        }
+
+        println!("Pushing to {}", branch_name);
+        remote.push(
+            &[format!(
+                "refs/heads/__temporary__:refs/heads/{}",
+                branch_name
+            )],
+            Some(&mut options),
+        )?;
+        Ok(())
+    }
 }
 
 pub fn run(args: Args) -> Result<()> {
-    let repo = Repository::open(args.repository.clone())?;
+    let child_repository = RepositoryWrapper::open(&args.repository, &args)?;
 
-    let head = repo.head()?;
-    if !head.is_branch() {
-        return Err("HEAD is not a branch".into());
-    }
-
-    let push_options = resolve_git_push(&args)?;
-    let fetch_options = resolve_git_fetch(&args)?;
+    let git_ref = child_repository.git_ref()?;
+    let child_head_oid = child_repository.head_id()?;
 
     let composite_repo =
-        clone_composite(&args.composite_repository, &head, fetch_options)?;
+        RepositoryWrapper::clone(&args.composite_repository, &args)?;
 
-    let mut submodule = find_submodule(&composite_repo, &head)?;
+    composite_repo.checkout_temp_branch(&git_ref)?;
 
-    let commit = head.peel_to_commit()?;
+    let mut submodule = composite_repo.find_submodule_by_id(child_head_oid)?;
 
-    update_submodule(&mut submodule, commit.id())?;
+    composite_repo.update_submodule_to_id(&mut submodule, child_head_oid)?;
 
-    commit_composite(&composite_repo, &submodule, &commit)?;
-
-    // push_composite(&composite_repo, resolve_git_auth(args))?;
-    push_composite(&composite_repo, push_options)?;
+    composite_repo.push(&git_ref)?;
 
     Ok(())
 }
